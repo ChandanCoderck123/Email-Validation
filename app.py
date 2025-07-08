@@ -1,9 +1,13 @@
-import re                    # Regex for syntax checks
-import dns.resolver          # To resolve DNS records (for MX record check)
-import smtplib               # For SMTP server communication
-import socket                # For low-level network exceptions
+import re                            # For regex syntax validation
+import dns.resolver                  # To resolve MX DNS records
+import smtplib                       # For SMTP server communication
+import socket                        # For handling network exceptions
+import pandas as pd                  # For reading/writing CSV files
+from io import StringIO, BytesIO     # For in-memory file handling
 
-from flask import Flask, request, jsonify  # Flask essentials
+from flask import Flask, request, jsonify, send_file  # Flask web stuff
+
+from flask_cors import CORS          # For handling CORS during local/frontend testing
 
 # Heuristic Datasets 
 DISPOSABLE_DOMAINS = {
@@ -14,7 +18,7 @@ ROLE_ACCOUNTS = {
     "admin", "support", "info", "sales", "contact", "help", "webmaster", "office"
 }
 BLOCKLISTED_EMAILS = {
-    "baduser@scam.com",  # Example blocklisted address
+    "baduser@scam.com",
 }
 BLOCKLISTED_DOMAINS = {
     "spammydomain.com"
@@ -24,8 +28,7 @@ HISTORICAL_BOUNCES = {
     "test@companybounced.com"
 }
 
-# Main Validation Functions 
-
+# Email Validation Functions
 def is_valid_syntax(email):
     """Check if the email format is valid using regex."""
     regex = r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$"
@@ -67,7 +70,7 @@ def smtp_check(email, from_address="test@example.com"):
     domain = get_domain(email)
     smtp_debug_log = []
     try:
-        # Resolve MX host
+        # Resolve MX host for the recipient domain
         mx_records = dns.resolver.resolve(domain, 'MX')
         mx_host = str(mx_records[0].exchange)
         smtp_debug_log.append(f"[SMTP] MX Host: {mx_host}")
@@ -79,7 +82,8 @@ def smtp_check(email, from_address="test@example.com"):
 
     server = None
     try:
-        server = smtplib.SMTP(timeout=10)  # Open connection with timeout
+        # Open connection with a timeout
+        server = smtplib.SMTP(timeout=10)
         smtp_debug_log.append(f"[SMTP] Connecting to {mx_host}...")
         server.connect(mx_host)
         smtp_debug_log.append("[SMTP] Connected!")
@@ -227,15 +231,14 @@ def validate_email(email):
 
     return result, logs
 
-# === FLASK PART ===
-
-# Create Flask app
-app = Flask(__name__)
+# Flask App Setup 
+app = Flask(__name__)     # Create Flask web app instance
+CORS(app)                 # Enable CORS for frontend integration (remove if not needed)
 
 @app.route('/validate', methods=['POST'])
 def api_validate():
     """
-    REST endpoint to validate an email address.
+    REST endpoint to validate an email address (for single email POST).
     Accepts JSON: { "email": "someone@email.com" }
     Returns JSON with validation result and step-by-step log.
     """
@@ -247,17 +250,50 @@ def api_validate():
     result, logs = validate_email(email)
     return jsonify({"result": result, "logs": logs})
 
-# Run the Flask server if this script is executed
+@app.route('/validate-csv', methods=['POST'])
+def validate_csv():
+    """
+    REST endpoint to validate a batch of emails via CSV upload.
+    Accepts CSV file with 'email' column. Returns a CSV with an added 'final_status' column.
+    """
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part in the request"}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+
+    # Read the uploaded CSV file into pandas DataFrame
+    try:
+        df = pd.read_csv(file)
+    except Exception as e:
+        return jsonify({"error": f"Error reading CSV: {e}"}), 400
+
+    if 'email' not in df.columns:
+        return jsonify({"error": "CSV must have an 'email' column"}), 400
+
+    # Validate each email and collect results
+    final_statuses = []
+    for email in df['email']:
+        email = str(email).strip()
+        result, logs = validate_email(email)
+        final_statuses.append(result['final_status'])
+
+    # Add new column to DataFrame with final results
+    df['final_status'] = final_statuses
+
+    # Write result DataFrame to CSV in memory
+    output = StringIO()
+    df.to_csv(output, index=False)
+    output.seek(0)
+
+    # Return the new CSV as a downloadable file
+    return send_file(
+        BytesIO(output.getvalue().encode()),
+        mimetype='text/csv',
+        as_attachment=True,
+        download_name='validated_emails.csv'
+    )
+
+# Run Flask Server 
 if __name__ == "__main__":
-    # Comment out the CLI usage; now handled by Flask endpoint!
-    # email = input("Enter the email address to validate: ").strip()
-    # print("\nRunning ALL validation checks...\n")
-    # result, logs = validate_email(email)
-    # print("\n===== Step-by-Step Log =====")
-    # for log in logs:
-    #     print(log)
-    # print("\n===== Email Validation Result =====")
-    # for k, v in result.items():
-    #     print(f"{k}: {v}")
-    # print("===================================")
     app.run(debug=True, port=5000)
