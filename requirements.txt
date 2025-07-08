@@ -1,4 +1,3 @@
 flask
 dnspython
 pandas
-flask-cors
